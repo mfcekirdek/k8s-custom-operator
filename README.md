@@ -10,3 +10,5 @@ kubebuilder init --domain order.io --repo github.com/order
 # To create api
 kubebuilder create api --group webapp --version v1 --kind Order 
 
+# To create CRD
+make manifests; make generate; make install;
