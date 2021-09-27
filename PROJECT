@@ -1,0 +1,6 @@
+domain: order.io
+layout:
+- go.kubebuilder.io/v3
+projectName: k8s-custom-operator
+repo: github.com/order
+version: "3"
