@@ -18,8 +18,12 @@ package controllers
 
 import (
 	"context"
-	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,10 +56,54 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	var order webappv1.Order
 	if err := r.Get(ctx, req.NamespacedName, &order); err != nil {
-		logger.Error(err, "error getting order ")
+		if errors.IsNotFound(err) {
+			// Request object not found, could have been deleted after reconcile request.
+			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
+			// Return and don't requeue
+			logger.Error(err, "error getting order ")
+			return reconcile.Result{}, nil
+		}
+		// Error reading the object - requeue the request.
+		return reconcile.Result{}, err
+	}
+	// fmt.Println(order)
+
+	//lbls := labels.Set{
+	//	"app": order.Name,
+	//	"version": "v0.1",
+	//}
+
+	lbls := labels.Set{}
+	existingPods := corev1.PodList{}
+
+	listOptions := &client.ListOptions{
+		Namespace:     req.Namespace,
+		LabelSelector: labels.SelectorFromSet(lbls),
+	}
+	if err := r.Client.List(ctx, &existingPods, listOptions); err != nil {
+		logger.Error(err, "failed to list existing pods in the podSet")
+		return ctrl.Result{}, err
 	}
 
-	fmt.Println(order)
+	podToBeCreated := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: order.Name + "-pod",
+			Namespace:    order.Namespace,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "nginx",
+					Image: "nginx",
+				},
+			}},
+	}
+
+	if err := r.Client.Create(ctx, &podToBeCreated); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// fmt.Println(existingPods)
 	return ctrl.Result{}, nil
 }
 
