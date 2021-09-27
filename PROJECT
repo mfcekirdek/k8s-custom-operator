@@ -3,4 +3,14 @@ layout:
 - go.kubebuilder.io/v3
 projectName: k8s-custom-operator
 repo: github.com/order
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: order.io
+  group: webapp
+  kind: Order
+  path: github.com/order/api/v1
+  version: v1
 version: "3"
