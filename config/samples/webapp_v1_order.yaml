@@ -1,0 +1,7 @@
+apiVersion: webapp.order.io/v1
+kind: Order
+metadata:
+  name: order-sample
+spec:
+  # Add fields here
+  foo: bar
