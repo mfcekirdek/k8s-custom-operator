@@ -1,0 +1,7 @@
+apiVersion: webapp.order.io/v1
+kind: Order
+metadata:
+  name: order-cloth
+spec:
+  # Add fields here
+  foo: tunik
