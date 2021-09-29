@@ -18,12 +18,13 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,7 +67,50 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, err
 	}
-	// fmt.Println(order)
+
+	// name of your custom finalizer
+	myFinalizerName := "storage.finalizers.order.io"
+
+	if order.ObjectMeta.DeletionTimestamp.IsZero() {
+		// The object is not being deleted, so if it does not have our finalizer,
+		// then lets add the finalizer and update the object.
+		if !containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
+			order.ObjectMeta.Finalizers = append(order.ObjectMeta.Finalizers, myFinalizerName)
+			if err := r.Update(ctx, &order); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+	} else { // The object is being deleted
+		order.Status.Status = "Terminating"
+		order.Spec.Foo = "mfc"
+		if err := r.Update(ctx, &order); err != nil {
+			return reconcile.Result{}, err
+		}
+
+		if containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
+			// our finalizer is present, so lets handle our external dependency
+			if err := r.deleteExternalDependencies(&order); err != nil {
+				// if fail to delete the external dependency here, return with error
+				// so that it can be retried
+				return reconcile.Result{}, err
+			}
+			// remove our finalizer from the list and update it.
+			order.ObjectMeta.Finalizers = removeString(order.ObjectMeta.Finalizers, myFinalizerName)
+			if err := r.Update(ctx, &order); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+	}
+
+	if order.Status.Status == "" {
+		order.Status.Status = "running"
+		fmt.Println("running")
+	} else if order.Status.Status == "error" {
+		fmt.Println("ERROR!!!!")
+		return ctrl.Result{}, nil
+	} else {
+		fmt.Println("ELSE!")
+	}
 
 	//lbls := labels.Set{
 	//	"app": order.Name,
@@ -112,4 +156,36 @@ func (r *OrderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&webappv1.Order{}).
 		Complete(r)
+}
+
+func (r *OrderReconciler) deleteExternalDependencies(order *webappv1.Order) error {
+	fmt.Println("deleting the external dependencies")
+	//
+	// delete the external dependency here
+	//
+	// Ensure that delete implementation is idempotent and safe to invoke
+	// multiple types for same object.
+	return nil
+}
+
+//
+// Helper functions to check and remove string from a slice of strings.
+//
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(slice []string, s string) (result []string) {
+	for _, item := range slice {
+		if item == s {
+			continue
+		}
+		result = append(result, item)
+	}
+	return
 }
