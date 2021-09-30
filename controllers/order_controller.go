@@ -23,14 +23,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	webappv1 "github.com/order/api/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	webappv1 "github.com/order/api/v1"
 )
 
 // OrderReconciler reconciles a Order object
@@ -61,10 +60,11 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
-			logger.Error(err, "error getting order ")
+			// logger.Error(err, "error getting order ")
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
+		logger.Error(err, "error getting order ")
 		return reconcile.Result{}, err
 	}
 
@@ -72,14 +72,6 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	myFinalizerName := "storage.finalizers.order.io"
 
 	if order.ObjectMeta.DeletionTimestamp.IsZero() {
-		if order.Status.Status == "" {
-			// Order is just created, so it's initial status is empty. We set status to running and update the status.
-			order.Status.Status = "Running"
-			if err := r.Status().Update(ctx, &order); err != nil {
-				return reconcile.Result{}, err
-			}
-		}
-
 		// The object is not being deleted, so if it does not have our finalizer,
 		// then lets add the finalizer and update the object.
 		if !containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
@@ -88,15 +80,56 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 				return reconcile.Result{}, err
 			}
 		}
-	} else { // The object is being deleted
-		order.Status.Status = "Terminating"
-		if err := r.Status().Update(ctx, &order); err != nil {
-			return reconcile.Result{}, err
-		}
 
+		if order.Status.Status == "" {
+			// Order is just created, so it's initial status is empty. We set status to running and update the status.
+			fmt.Println("Order is just created, setting status to Running")
+			order.Status.Status = "Running"
+			if err := r.Status().Update(ctx, &order); err != nil {
+				return reconcile.Result{}, err
+			}
+
+			// Creating resources..
+			podToBeCreated := corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: order.Name + "-pod",
+					Namespace:    order.Namespace,
+					Labels: map[string]string{
+						"app":     "order",
+						"version": "v0.1",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "nginx",
+							Image: "nginx",
+						},
+					}},
+			}
+
+			if err := r.Client.Create(ctx, &podToBeCreated); err != nil {
+				return ctrl.Result{}, err
+			}
+		} else if order.Status.Status == "Running" {
+			fmt.Println("Yes it is already running")
+			return reconcile.Result{}, nil
+		}
+	} else { // The object is being deleted
 		if containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
+			if order.Status.Status == "Terminating" {
+				fmt.Println("Yes it is already terminating")
+				return reconcile.Result{}, nil
+			}
+
+			fmt.Println("Order is being deleted, setting status to Terminating")
+			order.Status.Status = "Terminating"
+			if err := r.Status().Update(ctx, &order); err != nil {
+				return reconcile.Result{}, err
+			}
+
 			// our finalizer is present, so lets handle our external dependency
-			if err := r.deleteExternalDependencies(&order); err != nil {
+			if err := r.deleteExternalDependencies(ctx, req, &order); err != nil {
 				// if fail to delete the external dependency here, return with error
 				// so that it can be retried
 				return reconcile.Result{}, err
@@ -114,35 +147,17 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	//	"version": "v0.1",
 	//}
 
-	lbls := labels.Set{}
-	existingPods := corev1.PodList{}
-
-	listOptions := &client.ListOptions{
-		Namespace:     req.Namespace,
-		LabelSelector: labels.SelectorFromSet(lbls),
-	}
-	if err := r.Client.List(ctx, &existingPods, listOptions); err != nil {
-		logger.Error(err, "failed to list existing pods in the podSet")
-		return ctrl.Result{}, err
-	}
-
-	podToBeCreated := corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: order.Name + "-pod",
-			Namespace:    order.Namespace,
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "nginx",
-					Image: "nginx",
-				},
-			}},
-	}
-
-	if err := r.Client.Create(ctx, &podToBeCreated); err != nil {
-		return ctrl.Result{}, err
-	}
+	//lbls := labels.Set{}
+	//existingPods := corev1.PodList{}
+	//listOptions := &client.ListOptions{
+	//	Namespace:     req.Namespace,
+	//	LabelSelector: labels.SelectorFromSet(lbls),
+	//}
+	//
+	//if err := r.Client.List(ctx, &existingPods, listOptions); err != nil {
+	//	logger.Error(err, "failed to list existing pods in the podSet")
+	//	return ctrl.Result{}, err
+	//}
 
 	return ctrl.Result{}, nil
 }
@@ -154,13 +169,29 @@ func (r *OrderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *OrderReconciler) deleteExternalDependencies(order *webappv1.Order) error {
+func (r *OrderReconciler) deleteExternalDependencies(ctx context.Context, req ctrl.Request, order *webappv1.Order) error {
 	fmt.Println("deleting the external dependencies")
 	//
 	// delete the external dependency here
 	//
 	// Ensure that delete implementation is idempotent and safe to invoke
 	// multiple types for same object.
+
+	lbls := labels.Set{
+		"app":     "order",
+		"version": "v0.1",
+	}
+	listOptions := client.ListOptions{
+		Namespace:     req.Namespace,
+		LabelSelector: labels.SelectorFromSet(lbls),
+	}
+
+	if err := r.Client.DeleteAllOf(ctx, &corev1.Pod{}, &client.DeleteAllOfOptions{
+		ListOptions:   listOptions,
+		DeleteOptions: client.DeleteOptions{},
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
