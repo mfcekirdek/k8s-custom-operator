@@ -72,6 +72,14 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	myFinalizerName := "storage.finalizers.order.io"
 
 	if order.ObjectMeta.DeletionTimestamp.IsZero() {
+		if order.Status.Status == "" {
+			// Order is just created, so it's initial status is empty. We set status to running and update the status.
+			order.Status.Status = "Running"
+			if err := r.Status().Update(ctx, &order); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+
 		// The object is not being deleted, so if it does not have our finalizer,
 		// then lets add the finalizer and update the object.
 		if !containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
@@ -82,8 +90,7 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 	} else { // The object is being deleted
 		order.Status.Status = "Terminating"
-		order.Spec.Foo = "mfc"
-		if err := r.Update(ctx, &order); err != nil {
+		if err := r.Status().Update(ctx, &order); err != nil {
 			return reconcile.Result{}, err
 		}
 
@@ -100,16 +107,6 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 				return reconcile.Result{}, err
 			}
 		}
-	}
-
-	if order.Status.Status == "" {
-		order.Status.Status = "running"
-		fmt.Println("running")
-	} else if order.Status.Status == "error" {
-		fmt.Println("ERROR!!!!")
-		return ctrl.Result{}, nil
-	} else {
-		fmt.Println("ELSE!")
 	}
 
 	//lbls := labels.Set{
@@ -147,7 +144,6 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 
-	// fmt.Println(existingPods)
 	return ctrl.Result{}, nil
 }
 
