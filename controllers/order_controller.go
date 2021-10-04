@@ -20,12 +20,14 @@ import (
 	"context"
 	"fmt"
 	webappv1 "github.com/order/api/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // OrderReconciler reconciles a Order object
@@ -49,12 +51,13 @@ type OrderReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.8.3/pkg/reconcile
 func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	instance := &webappv1.Order{}
+	orderFinalizer := "webappv1.finalizer"
 	err := r.Get(context.TODO(), req.NamespacedName, instance)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// object not found, could have been deleted after
 			// reconcile request, hence don't requeue
-			return ctrl.Result{}, nil
+			return r.deleteOrder(ctx, req, instance, orderFinalizer)
 		}
 
 		// error reading the object, requeue the request
@@ -66,73 +69,27 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		instance.Status.Status = webappv1.StatusPending
 	}
 
+	// state transition PENDING -> RUNNING -> DONE
+
 	switch instance.Status.Status {
 	case webappv1.StatusPending:
-		println("Phase: PENDING")
-
-		//diff, err := schedule.TimeUntilSchedule(instance.Spec.Schedule)
-		//if err != nil {
-		//	println(err, "Schedule parsing failure")
-		//
-		//	return ctrl.Result{}, err
-		//}
-		//
-		//println("Schedule parsing done", "Result", fmt.Sprintf("%v", diff))
-		//
-		//if diff > 0 {
-		//	// not yet time to execute, wait until scheduled time
-		//	return ctrl.Result{RequeueAfter: diff * time.Second}, nil
-		//}
-		//
-		//println("It's time!", "Ready to execute", instance.Spec.Command)
-		//// change state
+		fmt.Println("Status: PENDING")
 		instance.Status.Status = webappv1.StatusRunning
+
+		fmt.Println("Adding finalizer..")
+		controllerutil.AddFinalizer(instance, orderFinalizer)
+
+		err = r.createResources(ctx, instance, req)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	case webappv1.StatusRunning:
-		println("Phase: RUNNING")
-
-		//pod := spawn.NewPodForCR(instance)
-		//err := ctrl.SetControllerReference(instance, pod, r.Scheme)
-		//if err != nil {
-		//	// requeue with error
-		//	return ctrl.Result{}, err
-		//}
-
-		query := &corev1.Pod{}
-		// try to see if the pod already exists
-		err = r.Get(context.TODO(), req.NamespacedName, query)
-		return ctrl.Result{}, nil
-		//if err != nil && errors.IsNotFound(err) {
-		//	//// does not exist, create a pod
-		//	//err = r.Create(context.TODO(), pod)
-		//	//if err != nil {
-		//	//	return ctrl.Result{}, err
-		//	//}
-		//	//
-		//	//// Successfully created a Pod
-		//	//println("Pod Created successfully", "name", pod.Name)
-		//	return ctrl.Result{}, nil
-		//} else if err != nil {
-		//	// requeue with err
-		//	println(err, "cannot create pod")
-		//	return ctrl.Result{}, err
-		//} else if query.Status.Phase == corev1.PodFailed ||
-		//	query.Status.Phase == corev1.PodSucceeded {
-		//	// pod already finished or errored out`
-		//	println("Container terminated", "reason", query.Status.Reason,
-		//		"message", query.Status.Message)
-		//	instance.Status.Status = webappv1.StatusDone
-		//} else {
-		//	// don't requeue, it will happen automatically when
-		//	// pod status changes
-		//	return ctrl.Result{}, nil
-		//}
-	case webappv1.StatusDone:
-		println("Phase: DONE")
-		// reconcile without requeuing
-		return ctrl.Result{}, nil
-	default:
-		println("NOP")
-		return ctrl.Result{}, nil
+		fmt.Println("Status: RUNNING")
+		if instance.DeletionTimestamp.IsZero() {
+			r.checkResourcesExist(ctx, req)
+		} else { // is deleting..
+			return r.deleteOrder(ctx, req, instance, orderFinalizer)
+		}
 	}
 
 	// update status
@@ -142,15 +99,128 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	return ctrl.Result{}, nil
+}
 
+func (r *OrderReconciler) deleteOrder(ctx context.Context, req ctrl.Request, instance *webappv1.Order, orderFinalizer string) (ctrl.Result, error) {
+	fmt.Println("Deleting dependencies..")
+	if err := r.deleteExternalDependencies(ctx, req, instance); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	fmt.Println("Deleting finalizer from order..")
+	controllerutil.RemoveFinalizer(instance, orderFinalizer)
+
+	instance.Status.Status = webappv1.StatusDeleting
+	return ctrl.Result{}, nil
+}
+
+func (r *OrderReconciler) createResources(ctx context.Context, instance *webappv1.Order, req ctrl.Request) error {
+	resources := r.prepareResources(instance, req)
+	for _, resource := range resources {
+		if err := ctrl.SetControllerReference(instance, resource, r.Scheme); err != nil {
+			return err
+		}
+
+		fmt.Println("Resource created: ", resource.GetName())
+	}
+	return nil
+}
+
+func (r *OrderReconciler) prepareResources(instance *webappv1.Order, req ctrl.Request) []client.Object {
+	result := []client.Object{}
+	replicas := int32(2)
+	podLabels := map[string]string{
+		"foo": instance.Spec.Foo,
+	}
+	deployment := appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.SchemeGroupVersion.String(), Kind: "Deployment"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:         req.Name,
+			GenerateName: req.Name + "-deployment",
+			Namespace:    req.Namespace,
+			Labels: map[string]string{
+				"foo": instance.Spec.Foo,
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: podLabels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: podLabels,
+				},
+				Spec: corev1.PodSpec{
+					Volumes: nil,
+					Containers: []corev1.Container{{
+						Name:            req.Name,
+						Image:           "nginx",
+						Command:         nil,
+						Args:            nil,
+						WorkingDir:      "",
+						Ports:           nil,
+						EnvFrom:         nil,
+						Env:             nil,
+						Resources:       corev1.ResourceRequirements{},
+						VolumeMounts:    nil,
+						VolumeDevices:   nil,
+						LivenessProbe:   nil,
+						ReadinessProbe:  nil,
+						StartupProbe:    nil,
+						ImagePullPolicy: "",
+					}},
+					RestartPolicy: "",
+				},
+			},
+		},
+	}
+
+	result = append(result, &deployment)
+	return result
+}
+
+func (r *OrderReconciler) checkResourcesExist(ctx context.Context, req ctrl.Request) (result bool, e error) {
+	query := &corev1.Pod{}
+	// try to see if the pod already exists
+	e = nil
+	result = false
+
+	fmt.Println("Checking resources..")
+	if err := r.Get(ctx, req.NamespacedName, query); err != nil {
+		if !errors.IsNotFound(err) {
+			e = err
+		}
+		fmt.Println("Creating deployment..")
+		// r.createResources(order)
+
+	} else {
+		fmt.Println("Editing deployment..")
+		result = true
+	}
+	return
+}
+
+func (r *OrderReconciler) getResourceStatus(ctx context.Context, req ctrl.Request) (result corev1.PodPhase, e error) {
+	query := &corev1.Pod{}
+	e = nil
+	result = ""
+
+	if err := r.Get(ctx, req.NamespacedName, query); err != nil {
+		if errors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	result = query.Status.Phase
+	return
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *OrderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&webappv1.Order{}).
-		Owns().
-		Owns()
 		Complete(r)
 }
 
@@ -162,21 +232,14 @@ func (r *OrderReconciler) deleteExternalDependencies(ctx context.Context, req ct
 	// Ensure that delete implementation is idempotent and safe to invoke
 	// multiple types for same object.
 
-	lbls := labels.Set{
-		"app":     "order",
-		"version": "v0.1",
-	}
-	listOptions := client.ListOptions{
-		Namespace:     req.Namespace,
-		LabelSelector: labels.SelectorFromSet(lbls),
+	resources := r.prepareResources(order, req)
+
+	for _, resource := range resources {
+		if err := r.Client.Delete(ctx, resource); err != nil {
+			return err
+		}
 	}
 
-	if err := r.Client.DeleteAllOf(ctx, &corev1.Pod{}, &client.DeleteAllOfOptions{
-		ListOptions:   listOptions,
-		DeleteOptions: client.DeleteOptions{},
-	}); err != nil {
-		return err
-	}
 	return nil
 }
 
