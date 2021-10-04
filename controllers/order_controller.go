@@ -19,14 +19,10 @@ package controllers
 import (
 	"context"
 	"fmt"
+	webappv1 "github.com/order/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	webappv1 "github.com/order/api/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,120 +48,109 @@ type OrderReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.8.3/pkg/reconcile
 func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	var order webappv1.Order
-	if err := r.Get(ctx, req.NamespacedName, &order); err != nil {
+	instance := &webappv1.Order{}
+	err := r.Get(context.TODO(), req.NamespacedName, instance)
+	if err != nil {
 		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
-			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
-			// Return and don't requeue
-			// logger.Error(err, "error getting order ")
-			return reconcile.Result{}, nil
+			// object not found, could have been deleted after
+			// reconcile request, hence don't requeue
+			return ctrl.Result{}, nil
 		}
-		// Error reading the object - requeue the request.
-		logger.Error(err, "error getting order ")
-		return reconcile.Result{}, err
+
+		// error reading the object, requeue the request
+		return ctrl.Result{}, err
 	}
 
-	// name of your custom finalizer
-	myFinalizerName := "storage.finalizers.order.io"
-
-	if order.ObjectMeta.DeletionTimestamp.IsZero() {
-		// The object is not being deleted, so if it does not have our finalizer,
-		// then lets add the finalizer and update the object.
-		if !containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
-			order.ObjectMeta.Finalizers = append(order.ObjectMeta.Finalizers, myFinalizerName)
-			if err := r.Update(ctx, &order); err != nil {
-				return reconcile.Result{}, err
-			}
-		}
-
-		if order.Status.Status == "" {
-			// Order is just created, so it's initial status is empty. We set status to running and update the status.
-			fmt.Println("Order is just created, setting status to Running")
-			order.Status.Status = "Running"
-			if err := r.Status().Update(ctx, &order); err != nil {
-				return reconcile.Result{}, err
-			}
-
-			// Creating resources..
-			podToBeCreated := corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: order.Name + "-pod",
-					Namespace:    order.Namespace,
-					Labels: map[string]string{
-						"app":     "order",
-						"version": "v0.1",
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "nginx",
-							Image: "nginx",
-						},
-					}},
-			}
-
-			if err := r.Client.Create(ctx, &podToBeCreated); err != nil {
-				return ctrl.Result{}, err
-			}
-		} else if order.Status.Status == "Running" {
-			fmt.Println("Yes it is already running")
-			return reconcile.Result{}, nil
-		}
-	} else { // The object is being deleted
-		if containsString(order.ObjectMeta.Finalizers, myFinalizerName) {
-			if order.Status.Status == "Terminating" {
-				fmt.Println("Yes it is already terminating")
-				return reconcile.Result{}, nil
-			}
-
-			fmt.Println("Order is being deleted, setting status to Terminating")
-			order.Status.Status = "Terminating"
-			if err := r.Status().Update(ctx, &order); err != nil {
-				return reconcile.Result{}, err
-			}
-
-			// our finalizer is present, so lets handle our external dependency
-			if err := r.deleteExternalDependencies(ctx, req, &order); err != nil {
-				// if fail to delete the external dependency here, return with error
-				// so that it can be retried
-				return reconcile.Result{}, err
-			}
-			// remove our finalizer from the list and update it.
-			order.ObjectMeta.Finalizers = removeString(order.ObjectMeta.Finalizers, myFinalizerName)
-			if err := r.Update(ctx, &order); err != nil {
-				return reconcile.Result{}, err
-			}
-		}
+	// if no phase set, default to Pending
+	if instance.Status.Status == "" {
+		instance.Status.Status = webappv1.StatusPending
 	}
 
-	//lbls := labels.Set{
-	//	"app": order.Name,
-	//	"version": "v0.1",
-	//}
+	switch instance.Status.Status {
+	case webappv1.StatusPending:
+		println("Phase: PENDING")
 
-	//lbls := labels.Set{}
-	//existingPods := corev1.PodList{}
-	//listOptions := &client.ListOptions{
-	//	Namespace:     req.Namespace,
-	//	LabelSelector: labels.SelectorFromSet(lbls),
-	//}
-	//
-	//if err := r.Client.List(ctx, &existingPods, listOptions); err != nil {
-	//	logger.Error(err, "failed to list existing pods in the podSet")
-	//	return ctrl.Result{}, err
-	//}
+		//diff, err := schedule.TimeUntilSchedule(instance.Spec.Schedule)
+		//if err != nil {
+		//	println(err, "Schedule parsing failure")
+		//
+		//	return ctrl.Result{}, err
+		//}
+		//
+		//println("Schedule parsing done", "Result", fmt.Sprintf("%v", diff))
+		//
+		//if diff > 0 {
+		//	// not yet time to execute, wait until scheduled time
+		//	return ctrl.Result{RequeueAfter: diff * time.Second}, nil
+		//}
+		//
+		//println("It's time!", "Ready to execute", instance.Spec.Command)
+		//// change state
+		instance.Status.Status = webappv1.StatusRunning
+	case webappv1.StatusRunning:
+		println("Phase: RUNNING")
+
+		//pod := spawn.NewPodForCR(instance)
+		//err := ctrl.SetControllerReference(instance, pod, r.Scheme)
+		//if err != nil {
+		//	// requeue with error
+		//	return ctrl.Result{}, err
+		//}
+
+		query := &corev1.Pod{}
+		// try to see if the pod already exists
+		err = r.Get(context.TODO(), req.NamespacedName, query)
+		return ctrl.Result{}, nil
+		//if err != nil && errors.IsNotFound(err) {
+		//	//// does not exist, create a pod
+		//	//err = r.Create(context.TODO(), pod)
+		//	//if err != nil {
+		//	//	return ctrl.Result{}, err
+		//	//}
+		//	//
+		//	//// Successfully created a Pod
+		//	//println("Pod Created successfully", "name", pod.Name)
+		//	return ctrl.Result{}, nil
+		//} else if err != nil {
+		//	// requeue with err
+		//	println(err, "cannot create pod")
+		//	return ctrl.Result{}, err
+		//} else if query.Status.Phase == corev1.PodFailed ||
+		//	query.Status.Phase == corev1.PodSucceeded {
+		//	// pod already finished or errored out`
+		//	println("Container terminated", "reason", query.Status.Reason,
+		//		"message", query.Status.Message)
+		//	instance.Status.Status = webappv1.StatusDone
+		//} else {
+		//	// don't requeue, it will happen automatically when
+		//	// pod status changes
+		//	return ctrl.Result{}, nil
+		//}
+	case webappv1.StatusDone:
+		println("Phase: DONE")
+		// reconcile without requeuing
+		return ctrl.Result{}, nil
+	default:
+		println("NOP")
+		return ctrl.Result{}, nil
+	}
+
+	// update status
+	err = r.Status().Update(context.TODO(), instance)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
+
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *OrderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&webappv1.Order{}).
+		Owns().
+		Owns()
 		Complete(r)
 }
 
