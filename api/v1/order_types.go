@@ -20,6 +20,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+
+const (
+	StatusPending = "PENDING"
+	StatusRunning = "RUNNING"
+	StatusDone    = "DONE"
+)
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -51,6 +58,9 @@ type Order struct {
 	Spec   OrderSpec   `json:"spec,omitempty"`
 	Status OrderStatus `json:"status,omitempty"`
 }
+
+
+
 
 //+kubebuilder:object:root=true
 
