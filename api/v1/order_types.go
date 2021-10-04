@@ -20,11 +20,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-
 const (
-	StatusPending = "PENDING"
-	StatusRunning = "RUNNING"
-	StatusDone    = "DONE"
+	StatusPending  = "PENDING"
+	StatusRunning  = "RUNNING"
+	StatusDeleting = "DELETING"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -58,9 +57,6 @@ type Order struct {
 	Spec   OrderSpec   `json:"spec,omitempty"`
 	Status OrderStatus `json:"status,omitempty"`
 }
-
-
-
 
 //+kubebuilder:object:root=true
 
