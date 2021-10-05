@@ -52,12 +52,12 @@ type OrderReconciler struct {
 func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	instance := &webappv1.Order{}
 	orderFinalizer := "webappv1.finalizer"
-	err := r.Get(context.TODO(), req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// object not found, could have been deleted after
 			// reconcile request, hence don't requeue
-			return r.deleteOrder(ctx, req, instance, orderFinalizer)
+			return ctrl.Result{}, nil
 		}
 
 		// error reading the object, requeue the request
@@ -74,55 +74,99 @@ func (r *OrderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	switch instance.Status.Status {
 	case webappv1.StatusPending:
 		fmt.Println("Status: PENDING")
-		instance.Status.Status = webappv1.StatusRunning
+		if err = r.updateStatus(ctx, instance, webappv1.StatusRunning); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		fmt.Println("Adding finalizer..")
 		controllerutil.AddFinalizer(instance, orderFinalizer)
+		if err = r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
 
-		err = r.createResources(ctx, instance, req)
+		err = r.patchResources(ctx, instance, req)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 	case webappv1.StatusRunning:
 		fmt.Println("Status: RUNNING")
 		if instance.DeletionTimestamp.IsZero() {
-			r.checkResourcesExist(ctx, req)
+			err = r.patchResources(ctx, instance, req)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
 		} else { // is deleting..
-			return r.deleteOrder(ctx, req, instance, orderFinalizer)
+			if err = r.updateStatus(ctx, instance, webappv1.StatusDeleting); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	case webappv1.StatusDeleting:
+		fmt.Println("Status: DELETING")
+		fmt.Println("Deleting dependencies..")
+		if err := r.deleteExternalDependencies(ctx, req, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		fmt.Println("Deleting finalizer from order..")
+		controllerutil.RemoveFinalizer(instance, orderFinalizer)
+		if err = r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
+	return ctrl.Result{}, nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *OrderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&webappv1.Order{}).
+		Complete(r)
+}
+
+func (r *OrderReconciler) updateStatus(ctx context.Context, instance *webappv1.Order, status string) error {
+	fmt.Println("Updating status to " + status)
+	instance.Status.Status = status
 	// update status
-	err = r.Status().Update(context.TODO(), instance)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return r.Status().Update(ctx, instance)
 }
 
-func (r *OrderReconciler) deleteOrder(ctx context.Context, req ctrl.Request, instance *webappv1.Order, orderFinalizer string) (ctrl.Result, error) {
-	fmt.Println("Deleting dependencies..")
-	if err := r.deleteExternalDependencies(ctx, req, instance); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	fmt.Println("Deleting finalizer from order..")
-	controllerutil.RemoveFinalizer(instance, orderFinalizer)
-
-	instance.Status.Status = webappv1.StatusDeleting
-	return ctrl.Result{}, nil
-}
-
-func (r *OrderReconciler) createResources(ctx context.Context, instance *webappv1.Order, req ctrl.Request) error {
+func (r *OrderReconciler) patchResources(ctx context.Context, instance *webappv1.Order, req ctrl.Request) error {
 	resources := r.prepareResources(instance, req)
+	applyOpts := []client.PatchOption{client.ForceOwnership, client.FieldOwner("order-controller")}
 	for _, resource := range resources {
 		if err := ctrl.SetControllerReference(instance, resource, r.Scheme); err != nil {
 			return err
 		}
 
-		fmt.Println("Resource created: ", resource.GetName())
+		if err := r.Patch(ctx, resource, client.Apply, applyOpts...); err != nil {
+			return err
+		}
+
+		fmt.Println("Resource patched: ", resource.GetName())
 	}
+	return nil
+}
+
+func (r *OrderReconciler) deleteExternalDependencies(ctx context.Context, req ctrl.Request, order *webappv1.Order) error {
+	fmt.Println("deleting the external dependencies")
+	//
+	// delete the external dependency here
+	//
+	// Ensure that delete implementation is idempotent and safe to invoke
+	// multiple types for same object.
+
+	resources := r.prepareResources(order, req)
+
+	for _, resource := range resources {
+		if err := r.Client.Delete(ctx, resource); err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -178,89 +222,4 @@ func (r *OrderReconciler) prepareResources(instance *webappv1.Order, req ctrl.Re
 
 	result = append(result, &deployment)
 	return result
-}
-
-func (r *OrderReconciler) checkResourcesExist(ctx context.Context, req ctrl.Request) (result bool, e error) {
-	query := &corev1.Pod{}
-	// try to see if the pod already exists
-	e = nil
-	result = false
-
-	fmt.Println("Checking resources..")
-	if err := r.Get(ctx, req.NamespacedName, query); err != nil {
-		if !errors.IsNotFound(err) {
-			e = err
-		}
-		fmt.Println("Creating deployment..")
-		// r.createResources(order)
-
-	} else {
-		fmt.Println("Editing deployment..")
-		result = true
-	}
-	return
-}
-
-func (r *OrderReconciler) getResourceStatus(ctx context.Context, req ctrl.Request) (result corev1.PodPhase, e error) {
-	query := &corev1.Pod{}
-	e = nil
-	result = ""
-
-	if err := r.Get(ctx, req.NamespacedName, query); err != nil {
-		if errors.IsNotFound(err) {
-			return "", nil
-		}
-		return "", err
-	}
-
-	result = query.Status.Phase
-	return
-}
-
-// SetupWithManager sets up the controller with the Manager.
-func (r *OrderReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&webappv1.Order{}).
-		Complete(r)
-}
-
-func (r *OrderReconciler) deleteExternalDependencies(ctx context.Context, req ctrl.Request, order *webappv1.Order) error {
-	fmt.Println("deleting the external dependencies")
-	//
-	// delete the external dependency here
-	//
-	// Ensure that delete implementation is idempotent and safe to invoke
-	// multiple types for same object.
-
-	resources := r.prepareResources(order, req)
-
-	for _, resource := range resources {
-		if err := r.Client.Delete(ctx, resource); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-//
-// Helper functions to check and remove string from a slice of strings.
-//
-func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
-
-func removeString(slice []string, s string) (result []string) {
-	for _, item := range slice {
-		if item == s {
-			continue
-		}
-		result = append(result, item)
-	}
-	return
 }
